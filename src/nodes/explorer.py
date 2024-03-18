@@ -13,6 +13,7 @@ from move_base_client import GoalSender
 from move_base_msgs.msg import MoveBaseActionFeedback
 from actionlib_msgs.msg import GoalStatus
 import math
+import random
 # Random Explorer Class
 class RandomExplorer:
 
@@ -22,7 +23,7 @@ class RandomExplorer:
         self.bad_statuses = [4, 5 , 8 , 9]
         self.goal_sender = GoalSender()
         self.currently_moving = False
-        self.run_once = True
+        self.run_twice = True
         self.latest_map_msg = None
         self.latest_map = None
         self.previous_goal_map_msg = None
@@ -30,8 +31,9 @@ class RandomExplorer:
         self.previous_cells_to_explore = None
         self.previous_idx = None
         self.cost_map = []
-        self.point_count = 256
-        self.previous_goals_max_size = 10
+        self.point_count = 512
+        self.previous_goals_max_size = 15
+        self.search_window = 10
         # self.subscriber_costmap = rospy.Subscriber('/move_base/global_costmap/costmap', OccupancyGrid, self.update_costmap)
         self.subscriber_map = rospy.Subscriber('/map', OccupancyGrid, self.update_map_subscribed)
         self.subscriber_move_base = rospy.Subscriber('move_base/feedback', MoveBaseActionFeedback, self.printFeedback)
@@ -94,28 +96,33 @@ class RandomExplorer:
         res = self.latest_map_msg.info.resolution
         
         cells = 0
-        cells_to_pick = np.zeros((cells_explored, 2))
+        # cells_to_pick = np.zeros((cells_explored, 2))
         
         previous_idx_of_goal = int((self.previous_goal_map_msg.info.width * current_goal[1]) + current_goal[0])
         rospy.loginfo("PREV IDX OF GOAL " + str(previous_idx_of_goal))
-        rospy.loginfo("ORIGIN OF CURRENT MAP " + str([self.latest_map_msg.info.origin.position.x, self.latest_map_msg.info.origin.position.y]))
-        rospy.loginfo("ORIGIN OF PREVIOUS MAP " + str([self.previous_goal_map_msg.info.origin.position.x, self.previous_goal_map_msg.info.origin.position.y]))
-        
-        for y in xrange(0, height):
-            for x in xrange(0, width):
-                idx = x + y * width
+        idx = current_goal[0] + current_goal[1] * width
+        good_cells = 0
+        for i in range(-1*int(self.search_window/2), int(self.search_window/2)):
+            for j in range(-1*int(self.search_window/2), int(self.search_window/2)):
+                window_index = int(idx + i + (width * j))
+                if self.latest_map[window_index] < 5:
+                    good_cells+=1
+        # for y in xrange(0, height):
+        #     for x in xrange(0, width):
+        #         idx = x + y * width
 
-                if self.latest_map[idx] > -1:
-                    cells_to_pick[cells][0] = x
-                    cells_to_pick[cells][1] = y
-                        # cells_to_pick[cells][2] = self.euclidean_distance(self.previous_goals[0],cells_to_pick[cells][0], cells_to_pick[cells][1])
-                    cells = cells + 1
+        #         if self.latest_map[idx] > -1:
+        #             cells_to_pick[cells][0] = x
+        #             cells_to_pick[cells][1] = y
+        #                 # cells_to_pick[cells][2] = self.euclidean_distance(self.previous_goals[0],cells_to_pick[cells][0], cells_to_pick[cells][1])
+        #             cells = cells + 1
         rospy.loginfo("value of previous grid in current map " + str(self.latest_map[previous_idx_of_goal]))
-        if self.latest_map[previous_idx_of_goal] != 0:
+        if self.latest_map[previous_idx_of_goal] != 0 or good_cells < 90:
             rospy.loginfo("BAD GOAL ABORT MISSION")
             self.goal_sender.cancel_goal()
+            self.previous_goals.pop()
         else:
-            rospy.loginfo("GOOD GOAL GO AHEAD")
+            rospy.loginfo("GOOD GOAL GO AHEAD, EMPTY CELLS NEAR " + str(good_cells))
     def process_map(self):
 
         # Get Map Metadata
@@ -129,11 +136,11 @@ class RandomExplorer:
         # Pick Goal and Create Msg
         cells_to_pick = self.get_valid_cells(height, self.latest_map, width)
         goal = None
-        if self.run_once or len(self.previous_goals) < 2:
-            goal = self.get_goal(cells_to_pick, map_origin, res)
-            self.run_once = False
+        if self.run_twice or len(self.previous_goals) < 2:
+            goal = self.get_goal(cells_to_pick, map_origin, res, width)
+            self.run_twice = False
         else:
-            goal = self.get_better_goal(cells_to_pick, map_origin, res)
+            goal = self.get_better_goal(cells_to_pick, map_origin, res, width)
 
         goal_msg = self.make_goal_msg(goal, map_frame_id)
 
@@ -152,7 +159,7 @@ class RandomExplorer:
             for x in xrange(0, width):
                 idx = x + y * width
 
-                if gridmap[idx] > -1 and gridmap[idx] < 5:
+                if gridmap[idx] > -1 and gridmap[idx] == 0:
                     cells_to_pick[cells][0] = x
                     cells_to_pick[cells][1] = y
                         # cells_to_pick[cells][2] = self.euclidean_distance(self.previous_goals[0],cells_to_pick[cells][0], cells_to_pick[cells][1])
@@ -161,16 +168,32 @@ class RandomExplorer:
         return cells_to_pick
 
     # Select Random Valid Cell
-    def get_goal(self, cells_to_pick, map_origin, res):
+    def get_goal(self, cells_to_pick, map_origin, res, width):
         # Pick Cell
         distance = 0
-        best_goal = None
+        best_goals = []
+        goal = None
         # for cell in cells_to_pick:
-        #     current_distance = self.euclidean_distance([0.0,0.0],cell)
-        #     if current_distance > distance:
+        #     current_distance = self.euclidean_distance([0.0,0.0], cell)
+        #     # rospy.loginfo(str(cell) + " - " + str(current_distance))
+
+        #     if current_distance > distance and current_distance < 200:
         #         goal = cell
-        rand_idx = np.random.randint(0, len(cells_to_pick))
-        goal = cells_to_pick[rand_idx]
+        #         rospy.loginfo(goal)
+        best_cell_count = 8 
+        for cell in cells_to_pick:
+            idx = cell[0] + cell[1] * width
+            good_cells = 0
+            for i in range(-1*int(self.search_window/2), int(self.search_window/2)):
+                for j in range(-1*int(self.search_window/2), int(self.search_window/2)):
+                    window_index = int(idx + i + (width * j))
+                    if self.latest_map[window_index] == 0:
+                        good_cells+=1
+            if good_cells >= 90:
+                best_goals.append(cell)
+        
+        rand_idx = np.random.randint(0, len(best_goals))
+        goal = best_goals[rand_idx]
         rospy.loginfo("---------------------")
         
         self.previous_goals.append(np.array(goal))
@@ -182,7 +205,7 @@ class RandomExplorer:
     def euclidean_distance(self, p1, p2):
         distance = math.sqrt( (p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
         return distance
-    def get_better_goal(self, cells_to_pick, map_origin, res):
+    def get_better_goal(self, cells_to_pick, map_origin, res, width):
         rospy.loginfo("GETTING BETTER GOAL")
         rospy.loginfo("PREVIOUS GOALS : " + str(self.previous_goals))
         rospy.loginfo(str(cells_to_pick))
@@ -194,41 +217,75 @@ class RandomExplorer:
         # for index, x in np.ndenumerate(cells_to_pick):
         #     if x[2] > mean and x[2] < treshold_dist:
         #         best_goal = x
-        possible_goals = []
+        possible_goals = {}
+        unique_cells = np.unique(cells_to_pick, axis=0)
+        for cell in unique_cells:
+            cell = list(cell)
+            cell = tuple(cell)
+            possible_goals[cell] = []
         for prev_goal in self.previous_goals[:-1]:
             for cell in cells_to_pick:
                 # ADD SELF.LATESTMAP CHECK FOR VALUES HERE
                 current_distance_to_grid = self.euclidean_distance(cell, prev_goal)
-                
-                if  current_distance_to_grid > best_distance:
-                    rospy.loginfo("nBEST = "+ str(current_distance_to_grid) + " BEST GOAL = " + str(cell) + "for Prev Goal = " + str(prev_goal))
-                    best_goal = cell
-                    best_distance = current_distance_to_grid
-                possible_goals.append((current_distance_to_grid, cell))
-        possible_goals = sorted(possible_goals, key= lambda x:x[0], reverse=True)
+                cell = list(cell)
+                cell = tuple(cell)
+
+                possible_goals[cell].append(current_distance_to_grid)
+
+
+        possible_goals_unique = []        
+        for key in possible_goals.keys():
+            distances = possible_goals[key]
+            mean_dist = sum(distances)/len(distances)
+            possible_goals_unique.append((key, mean_dist))
+        
+
+        possible_goals = sorted(possible_goals_unique, key= lambda x:x[1], reverse=True)
+        
         possible_goals = possible_goals[:self.point_count]
         rospy.loginfo(possible_goals)
         closest = 99999999
         best_goal = None
+        best_goals = []
+        best_cell_count = 6
         for possible_goal in possible_goals:
-            current_distance_to_point = self.euclidean_distance(possible_goal[1], self.previous_goals[-1])
-            if current_distance_to_point < closest:
-                best_goal = possible_goal[1]
-                
-        best_goal = possible_goals[0][1]
+            idx = possible_goal[0][0] + possible_goal[0][1] * width
+            good_cells = 0
+            for i in range(-1*int(self.search_window/2), int(self.search_window/2)):
+                for j in range(-1*int(self.search_window/2), int(self.search_window/2)):
+                    window_index = int(idx + i + (width * j))
+                    if self.latest_map[window_index] == 0:
+                        good_cells+=1
+            if good_cells > 90:
+                best_goals.append(possible_goal)
+
+        rospy.loginfo("NUMBER OF GOOD GOALS : " + str(len(best_goals)))
         
+        for goal in best_goals:
+            distance = self.euclidean_distance(goal[0], self.previous_goals[-1])
+            if distance < closest and distance >= 40:
+                best_goal = goal[0]
+                closest = distance
+        
+        if best_goal == None:
+            rospy.loginfo("NO GOOD GOALS, MAKING SHIT UP")
+            return self.get_goal(cells_to_pick, map_origin, res, width)
+        
+        rospy.loginfo(best_goal)
         # # rand_idx = np.random.randint(0, len(cells_to_pick))
         
         # goal = cells_to_pick[rand_idx]
-        goal = best_goal
+        goal = np.asarray(best_goal)
         self.previous_goals.append(goal)
         goal = (goal * res) + map_origin
         if len(self.previous_goals) > self.previous_goals_max_size:
+            rospy.loginfo("SIZE OF PREVIOUS GOALS ABOVE TRESHOLD REMOVING FIRST ELEMENT")
             self.previous_goals.pop(0)
         
         return goal
     def make_goal_msg(self, goal, frame_id="map"):
         # Get Message
+        w_value = random.randint(0,4) * 0.25
         goal_msg = PoseStamped()
         goal_msg.pose.position.x = goal[0]
         goal_msg.pose.position.y = goal[1]
