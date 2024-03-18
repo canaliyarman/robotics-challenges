@@ -1,0 +1,2 @@
+.
+-DCATKIN_DEVEL_PREFIX=/user/HS401/cy00473/group2_ws/devel -DCMAKE_INSTALL_PREFIX=/user/HS401/cy00473/group2_ws/install -G Unix Makefiles
